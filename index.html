@@ -23,6 +23,7 @@
         body,
         #map {
             height: 100%;
+            width: 100%;
         }
 
         .center-marker {
@@ -72,6 +73,7 @@
             flex-direction: column;
             gap: 12px;
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(6px);
         }
 
         @media (min-width: 600px) {
@@ -107,6 +109,21 @@
             background: #0056b3;
         }
 
+        #controls button:focus-visible {
+            outline: 2px solid #0056b3;
+            outline-offset: 2px;
+        }
+
+        #controls button:disabled {
+            background: #7daeff;
+            cursor: not-allowed;
+            opacity: 0.75;
+        }
+
+        #controls button:disabled:hover {
+            background: #7daeff;
+        }
+
         #controls select {
             font-size: 16px;
             padding: 12px 10px;
@@ -114,231 +131,363 @@
             border: 1px solid #ccc;
             width: 180px;
             box-sizing: border-box;
+            background-color: rgba(255, 255, 255, 0.95);
+        }
+
+        #controls select:focus-visible {
+            outline: 2px solid #0056b3;
+            outline-offset: 2px;
         }
     </style>
 </head>
 
-<body onload="javascript:setTimeout(function(){ location.reload(); },10800000);">
+<body>
     <div id="map">
     </div>
     <div id="controls">
         <div>
-            <select id="timeSelect" onchange="onChange()"></select>
-            <button onclick="prev('time')">◀</button>
-            <button onclick="next('time')">▶</button>
+            <select id="timeSelect"></select>
+            <button type="button" data-nav="time" data-direction="prev" aria-label="Previous time step">◀</button>
+            <button type="button" data-nav="time" data-direction="next" aria-label="Next time step">▶</button>
         </div>
         <div>
-            <select id="altitudeSelect" onchange="onChange()"></select>
-            <button onclick="prev('altitude')">◀</button>
-            <button onclick="next('altitude')">▶</button>
+            <select id="altitudeSelect"></select>
+            <button type="button" data-nav="altitude" data-direction="prev" aria-label="Previous altitude level">◀</button>
+            <button type="button" data-nav="altitude" data-direction="next" aria-label="Next altitude level">▶</button>
         </div>
     </div>
     <div class="center-marker">
-        <div id="centerLabel" class="marker-label">Loading…<br>Loading...</div>
+        <div id="centerLabel" class="marker-label" role="status" aria-live="polite">Loading…<br>Loading…</div>
         <div class="marker-dot"></div>
     </div>
     <script type="module">
+        const RELOAD_INTERVAL_MS = 3 * 60 * 60 * 1000;
+        const DEFAULT_MODEL = 'CH1';
+        const DEFAULT_MEMBER = 'CTRL';
+        const DEFAULT_ALTITUDE_LEVEL = 'Z80';
+        const ALTITUDE_START = 35;
+        const ALTITUDE_END = 80;
+        const FORECAST_HOURS = 34;
+        const IMAGE_UNSCALE = [-128, 127];
+        const DATA_BOUNDS = [5.379263587935693, 45.497280246347316, 11.0242973, 48.1058362];
+        const CLIP_BOUNDS = [-5, 45, 12, 49];
+        const BEFORE_LAYER_ID = 'water-lake';
+        const WIND_PALETTE = [
+            [1.852 * 0, [255, 255, 255]],
+            [1.852 * 4, [239, 244, 209]],
+            [1.852 * 6, [232, 244, 158]],
+            [1.852 * 10, [170, 206, 99]],
+            [1.852 * 14, [170, 206, 99]],
+            [1.852 * 18, [226, 237, 22]],
+            [1.852 * 22, [255, 237, 0]],
+            [1.852 * 26, [255, 237, 130]],
+            [1.852 * 30, [244, 209, 127]],
+            [1.852 * 35, [237, 165, 73]],
+            [1.852 * 40, [229, 140, 61]],
+            [1.852 * 45, [219, 124, 61]],
+        ];
+        const PARTICLE_PALETTE = [
+            [0, [0, 0, 0]],
+            [15, [255, 255, 255]],
+        ];
+
+        const buildForecastUrl = (model, member, altitude, time) =>
+            `data-copy/${model}-${member}-${altitude}-${time}-wind.png`;
+        const buildHeightUrl = altitude => `data-copy/hfl-${altitude}.tif`;
+        const computeParticleCount = () => Math.max(1, Math.round((window.innerWidth * window.innerHeight) / 3000));
+
         window.addEventListener('DOMContentLoaded', async () => {
-            const protocol = new pmtiles.Protocol();
-            maplibregl.addProtocol('pmtiles', protocol.tile);
-            const map = window.map = new maplibregl.Map({
-                container: 'map',
-                style: 'style-white.json',
-                center: [8.2, 46.8],
-                zoom: 8,
-                hash: 'map',
-                attributionControl: false,
-            });
+            try {
+                const reloadTimer = window.setTimeout(() => window.location.reload(), RELOAD_INTERVAL_MS);
+                window.addEventListener('beforeunload', () => window.clearTimeout(reloadTimer));
 
-            map.on('load', function () {
-                map.addSource('dem', {
-                    'type': 'raster-dem',
-                    'tiles': ['https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png'],
-                    'tileSize': 256,
-                    'minzoom': 0,
-                    'maxzoom': 13,
-                    'encoding': "terrarium",
+                WeatherLayers.setLibrary('geotiff', GeoTIFF);
+
+                const centerLabel = document.getElementById('centerLabel');
+                const selects = {
+                    time: document.getElementById('timeSelect'),
+                    altitude: document.getElementById('altitudeSelect'),
+                };
+                const navButtons = Array.from(document.querySelectorAll('[data-nav]'));
+
+                const protocol = new pmtiles.Protocol();
+                maplibregl.addProtocol('pmtiles', protocol.tile);
+
+                const map = window.map = new maplibregl.Map({
+                    container: 'map',
+                    style: 'style-white.json',
+                    center: [8.2, 46.8],
+                    zoom: 8,
+                    hash: 'map',
+                    attributionControl: false,
                 });
-                map.addLayer({
-                    id: "hills",
-                    type: "hillshade",
-                    source: "dem",
-                    paint: {
-                        'hillshade-method': 'igor',
-                        'hillshade-illumination-altitude': 45,
-                        'hillshade-illumination-direction': 315,
-                        'hillshade-shadow-color': 'rgba(0, 0, 0, 0.3)',
-                        'hillshade-highlight-color': 'rgba(255, 255, 255, 0.3)',
-                        'hillshade-accent-color': 'rgba(0, 0, 0, 0.3)',
-                    }
-                }, 'places_locality')
 
-            });
+                map.once('load', () => {
+                    map.addSource('dem', {
+                        type: 'raster-dem',
+                        tiles: ['https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png'],
+                        tileSize: 256,
+                        minzoom: 0,
+                        maxzoom: 13,
+                        encoding: 'terrarium',
+                    });
+                    map.addLayer({
+                        id: 'hills',
+                        type: 'hillshade',
+                        source: 'dem',
+                        paint: {
+                            'hillshade-method': 'igor',
+                            'hillshade-illumination-altitude': 45,
+                            'hillshade-illumination-direction': 315,
+                            'hillshade-shadow-color': 'rgba(0, 0, 0, 0.3)',
+                            'hillshade-highlight-color': 'rgba(255, 255, 255, 0.3)',
+                            'hillshade-accent-color': 'rgba(0, 0, 0, 0.3)',
+                        },
+                    }, 'places_locality');
+                });
 
-            map.addControl(new maplibregl.AttributionControl({
-                compact: true,
-                customAttribution: '<a href="https://sma.ch">MeteoSwiss ICON CH1</a> | <a href="https://weatherlayers.com/">WeatherLayers</a> | <a href="https://github.com/dducret/lowlevelwind">Source Code</a>'
-            }), 'top-left');
+                const attributionHtml = [
+                    '<a href="https://sma.ch">MeteoSwiss ICON CH1</a>',
+                    '<a href="https://weatherlayers.com/">WeatherLayers</a>',
+                    '<a href="https://github.com/dducret/lowlevelwind">Source Code</a>',
+                ].join(' | ');
+                map.addControl(new maplibregl.AttributionControl({
+                    compact: true,
+                    customAttribution: attributionHtml,
+                }), 'top-left');
 
-            await new Promise(resolve => map.once('style.load', resolve));
+                await new Promise(resolve => map.once('style.load', resolve));
 
-            WeatherLayers.setLibrary('geotiff', GeoTIFF);
+                const deckLayer = new deck.MapboxOverlay({
+                    interleaved: true,
+                    layers: [],
+                });
+                map.addControl(deckLayer);
 
-            const deckLayer = new deck.MapboxOverlay({
-                interleaved: true,
-                layers: [],
-            });
-            map.addControl(deckLayer);
-
-            function waitForDeck(getDeck) {
-                return new Promise(resolve => {
-                    function wait() {
-                        const deck = getDeck();
-                        if (deck && deck.getCanvas()) {
-                            resolve(deck);
-                        } else {
-                            setTimeout(wait, 100);
+                function waitForDeck(getDeck) {
+                    return new Promise(resolve => {
+                        function poll() {
+                            const deckInstance = getDeck();
+                            if (deckInstance && deckInstance.getCanvas()) {
+                                resolve(deckInstance);
+                            } else {
+                                setTimeout(poll, 100);
+                            }
                         }
+                        poll();
+                    });
+                }
+
+                await waitForDeck(() => deckLayer._deck);
+
+                const clipExtension = new deck.ClipExtension();
+                const baseLayerProps = {
+                    image2: null,
+                    imageSmoothing: 0,
+                    imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
+                    imageWeight: 0,
+                    bounds: DATA_BOUNDS,
+                    visible: true,
+                    extensions: [clipExtension],
+                    clipBounds: CLIP_BOUNDS,
+                    beforeId: BEFORE_LAYER_ID,
+                };
+
+                let image;
+                let hflImage;
+                let hasLayerData = false;
+                let latestUpdateToken = 0;
+
+                const updateMarkerLabel = () => {
+                    if (!hasLayerData) {
+                        return;
                     }
-                    wait();
-                });
-            }
-            const deckgl = window.deckgl = await waitForDeck(() => deckLayer._deck);
+                    if (!image || !hflImage) {
+                        centerLabel.innerHTML = 'NaN km/h<br>NaN m AMSL';
+                        return;
+                    }
 
-            let currentImageUrl = '';
-            let currentHflImageUrl = '';
-            let image = undefined;
-            let hflImage = undefined;
+                    try {
+                        const center = map.getCenter();
+                        const mapBounds = map.getBounds();
+                        const sampleLat = (center.lat + mapBounds.getNorth()) / 2;
+                        const samplePoint = [[center.lng, sampleLat]];
 
-            const imageUnscale = [-128, 127];
-            const bounds = [5.379263587935693, 45.497280246347316, 11.0242973, 48.1058362];
+                        const windCollection = WeatherLayers.getRasterPoints({
+                            image,
+                            image2: null,
+                            imageSmoothing: 0,
+                            imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
+                            imageWeight: 0,
+                            imageType: WeatherLayers.ImageType.VECTOR,
+                            imageUnscale: IMAGE_UNSCALE,
+                        }, DATA_BOUNDS, samplePoint);
 
-            const updateMarker = () => {
-                if (!image || !hflImage) {
-                    document.getElementById('centerLabel').innerHTML = 'NaN km/h<br>NaN m AMSL';
-                    return;
-                }
-                const imageProperties = {
-                    image,
-                    image2: null,
-                    imageSmoothing: 0,
-                    imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
-                    imageWeight: 0,
-                    imageType: WeatherLayers.ImageType.VECTOR,
-                    imageUnscale,
-                }
-                const hflImageProperties = {
-                    'image': hflImage,
-                    image2: null,
-                    imageSmoothing: 0,
-                    imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
-                    imageWeight: 0,
-                    imageType: WeatherLayers.ImageType.SCALAR,
-                }
-                const bbox = [-5, 45, 12, 49];
-                const center = map.getCenter();
-                const topLeft = map.unproject([0, 0]);
-                const points = [[center.lng, (center.lat + topLeft.lat) / 2]]
-                const collection = WeatherLayers.getRasterPoints(imageProperties, bounds, points);
-                const properties = collection['features'][0]['properties'];
-                const hflCollection = WeatherLayers.getRasterPoints(hflImageProperties, bounds, points);
-                const elevation = hflCollection['features'][0]['properties']['value'];
-                document.getElementById('centerLabel').innerHTML = `${properties.value.toFixed(1)} km/h<br>${elevation.toFixed(0)} m AMSL`;
-            }
+                        const windValue = windCollection?.features?.[0]?.properties?.value;
 
-            const updateLayers = async (model, member, altitude, time) => {
-                try {
-                    const newImage = await WeatherLayers.loadTextureData(`data-copy/${model}-${member}-${altitude}-${time}-wind.png`, false);
-                    image = newImage;
-                    const newHflImage = await WeatherLayers.loadTextureData(`data-copy/hfl-${altitude}.tif`, false);
-                    hflImage = newHflImage;
-                }
-                catch (err) {
-                    console.log('error', err)
-                    image = undefined;
+                        const heightCollection = WeatherLayers.getRasterPoints({
+                            image: hflImage,
+                            image2: null,
+                            imageSmoothing: 0,
+                            imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
+                            imageWeight: 0,
+                            imageType: WeatherLayers.ImageType.SCALAR,
+                        }, DATA_BOUNDS, samplePoint);
+
+                        const elevationValue = heightCollection?.features?.[0]?.properties?.value;
+
+                        if (typeof windValue === 'number' && typeof elevationValue === 'number') {
+                            centerLabel.innerHTML = `${windValue.toFixed(1)} km/h<br>${elevationValue.toFixed(0)} m AMSL`;
+                        } else {
+                            centerLabel.innerHTML = 'NaN km/h<br>NaN m AMSL';
+                        }
+                    } catch (error) {
+                        console.warn('Unable to update marker label', error);
+                        centerLabel.innerHTML = 'NaN km/h<br>NaN m AMSL';
+                    }
+                };
+
+                const requestMarkerUpdate = (() => {
+                    let scheduled = false;
+                    return () => {
+                        if (scheduled) {
+                            return;
+                        }
+                        scheduled = true;
+                        requestAnimationFrame(() => {
+                            scheduled = false;
+                            updateMarkerLabel();
+                        });
+                    };
+                })();
+
+                const setEmptyLayers = () => {
+                    hasLayerData = false;
                     deckLayer.setProps({ layers: [] });
-                    updateMarker();
-                    return;
-                }
+                    centerLabel.innerHTML = 'NaN km/h<br>NaN m AMSL';
+                    requestMarkerUpdate();
+                };
 
-                const paletteSMA = [
-                    [1.852 * 0, [255, 255, 255]],
-                    [1.852 * 4, [239, 244, 209]],
-                    [1.852 * 6, [232, 244, 158]],
-                    [1.852 * 10, [170, 206, 99]],
-                    [1.852 * 14, [170, 206, 99]],
-                    [1.852 * 18, [226, 237, 22]],
-                    [1.852 * 22, [255, 237, 0]],
-                    [1.852 * 26, [255, 237, 130]],
-                    [1.852 * 30, [244, 209, 127]],
-                    [1.852 * 35, [237, 165, 73]],
-                    [1.852 * 40, [229, 140, 61]],
-                    [1.852 * 45, [219, 124, 61]],
+                const buildLayers = () => [
+                    new WeatherLayers.RasterLayer({
+                        ...baseLayerProps,
+                        id: 'raster',
+                        image,
+                        imageType: WeatherLayers.ImageType.VECTOR,
+                        imageUnscale: IMAGE_UNSCALE,
+                        palette: WIND_PALETTE,
+                        opacity: 1.0,
+                        pickable: true,
+                    }),
+                    new WeatherLayers.ParticleLayer({
+                        ...baseLayerProps,
+                        id: 'particle',
+                        image,
+                        imageType: WeatherLayers.ImageType.VECTOR,
+                        imageUnscale: IMAGE_UNSCALE,
+                        palette: PARTICLE_PALETTE,
+                        opacity: 1.0,
+                        animate: true,
+                        numParticles: computeParticleCount(),
+                        maxAge: 15,
+                        speedFactor: 8,
+                        width: 2.5,
+                        color: [255, 255, 255],
+                        getPolygonOffset: () => [0, -1000],
+                    }),
                 ];
-                const beforeId = 'water-lake';
-                deckLayer.setProps({
-                    layers: [
-                        new WeatherLayers.RasterLayer({
-                            id: 'raster',
-                            image,
-                            image2: null,
-                            imageSmoothing: 0,
-                            imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
-                            imageWeight: 0,
-                            imageType: WeatherLayers.ImageType.VECTOR,
-                            imageUnscale,
-                            imageMinValue: null,
-                            imageMaxValue: null,
-                            bounds,
-                            visible: true,
-                            palette: paletteSMA,
-                            opacity: 1.0,
-                            pickable: true,
-                            extensions: [new deck.ClipExtension()],
-                            clipBounds: [-5, 45, 12, 49],
-                            beforeId,
-                        }),
-                        new WeatherLayers.ParticleLayer({
-                            id: 'particle',
-                            image,
-                            image2: null,
-                            imageSmoothing: 0,
-                            imageInterpolation: WeatherLayers.ImageInterpolation.CUBIC,
-                            imageWeight: 0,
-                            imageType: WeatherLayers.ImageType.VECTOR,
-                            imageUnscale,
-                            bounds,
-                            visible: true,
-                            numParticles: Math.round(100 * window.innerWidth * window.innerHeight / 300000),
-                            maxAge: 15,
-                            speedFactor: 8,
-                            width: 2.5,
-                            color: [255, 255, 255],
-                            palette: [
-                                [0, [0, 0, 0]],
-                                [15, [255, 255, 255]],
-                            ],
-                            opacity: 1.0,
-                            animate: true,
-                            extensions: [new deck.ClipExtension()],
-                            clipBounds: [-5, 45, 12, 49],
-                            getPolygonOffset: () => [0, -1000],
-                            beforeId,
-                        }),
-                    ],
+
+                const applyLayers = () => {
+                    if (!image || !hflImage) {
+                        setEmptyLayers();
+                        return;
+                    }
+                    hasLayerData = true;
+                    deckLayer.setProps({ layers: buildLayers() });
+                    requestMarkerUpdate();
+                };
+
+                const requestLayerRefresh = (() => {
+                    let scheduled = false;
+                    return () => {
+                        if (scheduled || !image || !hflImage) {
+                            return;
+                        }
+                        scheduled = true;
+                        requestAnimationFrame(() => {
+                            scheduled = false;
+                            applyLayers();
+                        });
+                    };
+                })();
+
+                const updateLayers = async (model, member, altitude, time) => {
+                    const token = ++latestUpdateToken;
+                    let textures;
+                    try {
+                        textures = await Promise.all([
+                            WeatherLayers.loadTextureData(buildForecastUrl(model, member, altitude, time), false),
+                            WeatherLayers.loadTextureData(buildHeightUrl(altitude), false),
+                        ]);
+                    } catch (error) {
+                        if (token === latestUpdateToken) {
+                            console.error('Failed to load weather layers', error);
+                            image = undefined;
+                            hflImage = undefined;
+                            setEmptyLayers();
+                        }
+                        return;
+                    }
+
+                    if (token !== latestUpdateToken) {
+                        return;
+                    }
+
+                    [image, hflImage] = textures;
+                    applyLayers();
+                };
+
+                window.addEventListener('resize', requestLayerRefresh);
+
+                const updateNavButtonState = () => {
+                    navButtons.forEach(button => {
+                        const { nav, direction } = button.dataset;
+                        const select = selects[nav];
+                        if (!select) {
+                            return;
+                        }
+                        if (direction === 'prev') {
+                            button.disabled = select.selectedIndex <= 0;
+                        } else if (direction === 'next') {
+                            button.disabled = select.selectedIndex >= select.options.length - 1;
+                        }
+                    });
+                };
+
+                navButtons.forEach(button => {
+                    button.addEventListener('click', () => {
+                        const { nav, direction } = button.dataset;
+                        const select = selects[nav];
+                        if (!select || (direction !== 'next' && direction !== 'prev')) {
+                            return;
+                        }
+                        const delta = direction === 'next' ? 1 : -1;
+                        const newIndex = Math.min(Math.max(select.selectedIndex + delta, 0), select.options.length - 1);
+                        if (newIndex !== select.selectedIndex) {
+                            select.selectedIndex = newIndex;
+                            select.dispatchEvent(new Event('change'));
+                        }
+                    });
                 });
 
-                updateMarker();
-            };
-
-            async function initControls() {
-                const models = ['CH1', 'CH2'];
-                const altitudeSteps = [];
-                for (let z = 35; z <= 80; ++z) { /* # According to MeteoSwiss, the published range is 1–80. Since Z35 is above 5,500 metres, no higher range is required */
-                    altitudeSteps.push(`Z${z}`)
-                }
-                const members = ['CTRL', ...Array.from({ length: 11 }, (_, i) => `EPS${i}`)];
-                const defaultAltitudeLevel = 'Z80';
+                map.on('move', requestMarkerUpdate);
+                map.dragRotate.disable();
+                map.touchZoomRotate.disableRotation();
+                map.keyboard.disableRotation();
+                map.setPitch(0);
+                map.setBearing(0);
+                map.resize();
+                map.once('idle', requestMarkerUpdate);
 
                 async function loadAltitudeLabels() {
                     try {
@@ -352,9 +501,9 @@
                                 if (!entry) {
                                     return acc;
                                 }
-                                const code = entry.code || entry.id || entry.level || entry.name;
+                                const code = entry.code ?? entry.id ?? entry.level ?? entry.name;
                                 const value = entry.meters ?? entry.altitude ?? entry.height ?? entry.value ?? entry.label;
-                                if (code) {
+                                if (code !== undefined) {
                                     acc[String(code)] = value;
                                 }
                                 return acc;
@@ -373,121 +522,95 @@
                 }
 
                 const altitudeLabelPromise = loadAltitudeLabels();
-                const lastRunResponse = await fetch('data-copy/last_run.json'); // Update this path
+                const lastRunResponse = await fetch('data-copy/last_run.json');
                 if (!lastRunResponse.ok) {
                     throw new Error(`Unexpected response ${lastRunResponse.status} while loading available times.`);
                 }
-                const altitudeLabelMap = await altitudeLabelPromise;
                 const data = await lastRunResponse.json();
-                const lastRunTimestamp = data.last_run;
-                const times = [];
-                for (let i = 0; i <= 33; i++) {
-                    times.push(lastRunTimestamp + i * 3600);
+                const lastRunTimestamp = Number(data.last_run);
+                if (!Number.isFinite(lastRunTimestamp)) {
+                    throw new Error('Received invalid last_run timestamp.');
                 }
 
-                const selectIds = {
-                    time: 'timeSelect',
-                    altitude: 'altitudeSelect',
+                const altitudeLabelMap = await altitudeLabelPromise;
+
+                const times = Array.from({ length: FORECAST_HOURS }, (_, index) => lastRunTimestamp + index * 3600);
+                const altitudeSteps = Array.from({ length: ALTITUDE_END - ALTITUDE_START + 1 }, (_, index) => `Z${ALTITUDE_START + index}`);
+
+                const dayFormatter = new Intl.DateTimeFormat([], { weekday: 'long' });
+                const timeFormatter = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+                const formatTimeLabel = value => {
+                    const date = new Date(Number(value) * 1000);
+                    return `${dayFormatter.format(date)} ${timeFormatter.format(date)}`;
                 };
-                
-                function formatCustomTime(unixSeconds) {
-                    const date = new Date(unixSeconds * 1000);
-                    const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-                    const day = weekdays[date.getDay()];
-                    const hours = date.getHours(); // local time
-                    return `${day} ${hours.toString().padStart(2, '0')}:00`;
-                }
-                
-                function formatAltitudeLabel(code) {
+
+                const formatAltitudeLabel = code => {
                     const raw = altitudeLabelMap?.[code];
                     if (raw === undefined || raw === null) {
                         return code;
                     }
-                    if (typeof raw === 'number') {
+                    if (typeof raw === 'number' && Number.isFinite(raw)) {
                         return `${raw} m AGL`;
                     }
                     const trimmed = String(raw).trim();
                     if (trimmed === '') {
                         return code;
                     }
+                    if (/\b(agl|amsl)\b/i.test(trimmed) || /m\b/i.test(trimmed)) {
+                        return trimmed;
+                    }
                     const numeric = Number(trimmed);
                     if (!Number.isNaN(numeric)) {
                         return `${numeric} m AGL`;
                     }
-                    return /m\b/i.test(trimmed) ? trimmed : `${trimmed} m AGL`;
-                }
+                    return `${trimmed} m AGL`;
+                };
 
-                function populateSelect(id, values, options = {}) {
-                    const sel = document.getElementById(id);
-                    sel.textContent = '';
-                    const { formatter, defaultValue } = options;
+                const populateSelect = (select, values, { formatter, defaultValue, onOption } = {}) => {
+                    const fragment = document.createDocumentFragment();
                     values.forEach(value => {
-                        const opt = document.createElement('option');
-                        opt.value = value;
+                        const option = document.createElement('option');
+                        option.value = String(value);
                         const label = formatter ? formatter(value) : value;
-                        opt.textContent = label;
-                        if (id === 'altitudeSelect' && label !== value) {
-                            opt.title = `${value} (${label})`;
+                        option.textContent = label;
+                        if (onOption) {
+                            onOption(option, value, label);
                         }
-                        sel.appendChild(opt);
+                        fragment.appendChild(option);
                     });
+                    select.replaceChildren(fragment);
                     if (defaultValue !== undefined) {
-                        const matching = Array.from(sel.options).find(option => option.value === defaultValue);
-                        if (matching) {
-                            matching.selected = true;
+                        select.value = String(defaultValue);
+                    }
+                };
+
+                populateSelect(selects.time, times, { formatter: formatTimeLabel });
+                populateSelect(selects.altitude, altitudeSteps, {
+                    formatter: formatAltitudeLabel,
+                    defaultValue: DEFAULT_ALTITUDE_LEVEL,
+                    onOption(option, value, label) {
+                        if (label !== value) {
+                            option.title = `${value} (${label})`;
                         }
-                    }
-                }
+                    },
+                });
 
-                populateSelect(selectIds.time, times, { formatter: formatCustomTime });
-                populateSelect(selectIds.altitude, altitudeSteps, { formatter: formatAltitudeLabel, defaultValue: defaultAltitudeLevel });
+                const handleSelectionChange = () => {
+                    updateNavButtonState();
+                    const altitude = selects.altitude.value;
+                    const time = selects.time.value;
+                    updateLayers(DEFAULT_MODEL, DEFAULT_MEMBER, altitude, time);
+                };
 
-                async function onChange() {
-                    const model = 'CH1'; 
-                    const time = document.getElementById('timeSelect').value;
-                    const altitude = document.getElementById('altitudeSelect').value;
-                    const member = 'CTRL'; 
-                    await updateLayers(model, member, altitude, time);
-                }
+                selects.time.addEventListener('change', handleSelectionChange);
+                selects.altitude.addEventListener('change', handleSelectionChange);
 
-                function prev(type) {
-                    const sel = document.getElementById(selectIds[type]);
-                    if (sel.selectedIndex > 0) {
-                        sel.selectedIndex -= 1;
-                    }
-                    onChange();
-                }
-
-                function next(type) {
-                    const sel = document.getElementById(selectIds[type]);
-                    if (sel.selectedIndex < sel.options.length - 1) {
-                        sel.selectedIndex += 1;
-                    }
-                    onChange();
-                }
-
-                window.onChange = onChange;
-                window.prev = prev;
-                window.next = next;
-
-                map.on('move', updateMarker);
-                map.dragRotate.disable();
-                map.touchZoomRotate.disableRotation();
-                map.keyboard.disableRotation();
-                map.setPitch(0);
-                map.setBearing(0);
-                map.resize();
-
-                onChange();
+                handleSelectionChange();
+            } catch (error) {
+                console.error('Failed to initialise application', error);
             }
-
-            initControls().catch(error => {
-                console.error('Failed to initialise controls', error);
-            });
-
         });
-
-
     </script>
 </body>
 
