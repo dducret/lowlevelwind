@@ -21,7 +21,7 @@ failed_api_calls = 0
 
 cache_path = 'sma-cache'
 data_path = 'data'
-data_copy_path = '/var/www/html/data-copy/'
+data_copy_path = '/data/sites/station/application/lowlevelwind/data-copy/'
 
 z_values = range(1, 81)
 
@@ -218,6 +218,7 @@ def make_horizon(reference_datetime, horizon, model, perturbed, eps):
         time_filename = int((reference_datetime + horizon).timestamp())
         filename = f'{data_path}/{model_filename}-{member_filename}-{z_filename}-{time_filename}-wind.png'
         save_png(f_U, f_V, filename)
+    return get_horizon_hours(horizon)
 
 def make_height_fields():
     ds = grib_decoder.load(
@@ -293,7 +294,7 @@ if __name__ == "__main__":
         latest_available_run = int(reference_datetime.timestamp())
 
         if last_run == latest_available_run:
-            sleep_min = 1
+            sleep_min = 15
             print(f'No new run available. Sleep for {sleep_min} min...')
             time.sleep(sleep_min * 60)
             continue
@@ -310,7 +311,7 @@ if __name__ == "__main__":
         print('Make height fields...')
         make_height_fields()
 
-        num_threads = 8
+        num_threads = 2
         print(f"Starting parallel tasks with {num_threads} threads...")
         with ProcessPoolExecutor(max_workers=num_threads) as executor:
             future_to_horizon = {
@@ -321,7 +322,7 @@ if __name__ == "__main__":
             for future in as_completed(future_to_horizon):
                 horizon = future_to_horizon[future]
                 result = future.result()
-                print(f"Completed: {result}")
+                print(f"Horizon Completed: {result} of {len(horizons)}")
                 
         with open('data/last_run.json', 'w') as f:
             json.dump({"last_run": latest_available_run}, f)
