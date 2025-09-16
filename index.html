@@ -40,13 +40,11 @@
             background: rgba(255, 0, 0, 1);
             border-radius: 50%;
             position: relative;
-            /* container for the absolutely positioned label */
         }
 
         .marker-label {
             position: absolute;
             bottom: 13px;
-            /* space below the dot */
             left: 50%;
             transform: translateX(-50%);
             text-align: center;
@@ -120,7 +118,7 @@
     </style>
 </head>
 
-<body>
+<body onload="javascript:setTimeout(function(){ location.reload(); },10800000);">
     <div id="map">
     </div>
     <div id="controls">
@@ -134,17 +132,6 @@
             <button onclick="prev('altitude')">◀</button>
             <button onclick="next('altitude')">▶</button>
         </div>
-        <!-- <div>
-            <button onclick="prev('model')">◀</button>
-            <select id="modelSelect" onchange="onChange()">
-            </select>
-            <button onclick="next('model')">▶</button>
-        </div>
-        <div>
-            <button onclick="prev('member')">◀</button>
-            <select id="memberSelect" onchange="onChange()"></select>
-            <button onclick="next('member')">▶</button>
-        </div> -->
     </div>
     <div class="center-marker">
         <div id="centerLabel" class="marker-label">Loading…<br>Loading...</div>
@@ -293,7 +280,6 @@
                     layers: [
                         new WeatherLayers.RasterLayer({
                             id: 'raster',
-                            // data properties
                             image,
                             image2: null,
                             imageSmoothing: 0,
@@ -304,7 +290,6 @@
                             imageMinValue: null,
                             imageMaxValue: null,
                             bounds,
-                            // style properties
                             visible: true,
                             palette: paletteSMA,
                             opacity: 1.0,
@@ -315,7 +300,6 @@
                         }),
                         new WeatherLayers.ParticleLayer({
                             id: 'particle',
-                            // data properties
                             image,
                             image2: null,
                             imageSmoothing: 0,
@@ -324,7 +308,6 @@
                             imageType: WeatherLayers.ImageType.VECTOR,
                             imageUnscale,
                             bounds,
-                            // style properties
                             visible: true,
                             numParticles: Math.round(100 * window.innerWidth * window.innerHeight / 300000),
                             maxAge: 15,
@@ -348,91 +331,144 @@
                 updateMarker();
             };
 
-
-
-            // Controls
-
             async function initControls() {
-
                 const models = ['CH1', 'CH2'];
-                // const altitudeSteps = Array.from({ length: (3000 - 600) / 50 + 1 }, (_, i) => (600 + i * 50) + 'M');
                 const altitudeSteps = [];
                 for (let z = 1; z <= 80; ++z) {
                     altitudeSteps.push(`Z${z}`)
                 }
-                // altitudeSteps.unshift('GND');
                 const members = ['CTRL', ...Array.from({ length: 11 }, (_, i) => `EPS${i}`)];
-                const currentHour = Math.floor(Date.now() / 3600000) * 3600;
+                const defaultAltitudeLevel = 'Z80';
 
-                const response = await fetch('data-copy/last_run.json'); // Update this path
-                const data = await response.json();
+                async function loadAltitudeLabels() {
+                    try {
+                        const response = await fetch('altitude_levels.json');
+                        if (!response.ok) {
+                            throw new Error(`Unexpected response ${response.status}`);
+                        }
+                        const payload = await response.json();
+                        if (Array.isArray(payload)) {
+                            return payload.reduce((acc, entry) => {
+                                if (!entry) {
+                                    return acc;
+                                }
+                                const code = entry.code || entry.id || entry.level || entry.name;
+                                const value = entry.meters ?? entry.altitude ?? entry.height ?? entry.value ?? entry.label;
+                                if (code) {
+                                    acc[String(code)] = value;
+                                }
+                                return acc;
+                            }, {});
+                        }
+                        if (payload && typeof payload === 'object') {
+                            if (payload.levels && typeof payload.levels === 'object') {
+                                return payload.levels;
+                            }
+                            return payload;
+                        }
+                    } catch (error) {
+                        console.warn('Unable to load altitude label mapping, falling back to model level codes.', error);
+                    }
+                    return {};
+                }
+
+                const altitudeLabelPromise = loadAltitudeLabels();
+                const lastRunResponse = await fetch('data-copy/last_run.json'); // Update this path
+                if (!lastRunResponse.ok) {
+                    throw new Error(`Unexpected response ${lastRunResponse.status} while loading available times.`);
+                }
+                const altitudeLabelMap = await altitudeLabelPromise;
+                const data = await lastRunResponse.json();
                 const lastRunTimestamp = data.last_run;
-                const times = []; //Array.from({ length: 31 }, (_, i) => lastRunTimestamp + i * 3600);
+                const times = [];
                 for (let i = 0; i <= 33; i++) {
                     times.push(lastRunTimestamp + i * 3600);
                 }
 
                 const selectIds = {
-                    // model: 'modelSelect',
                     time: 'timeSelect',
                     altitude: 'altitudeSelect',
-                    // member: 'memberSelect',
                 };
-
-                const options = {
-                    model: models,
-                    time: times,
-                    altitude: altitudeSteps,
-                    member: members,
-                };
-
+                
                 function formatCustomTime(unixSeconds) {
-                    const date = new Date(unixSeconds * 1000); // convert to ms
-                    const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                    const date = new Date(unixSeconds * 1000);
+                    const weekdays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
                     const day = weekdays[date.getDay()];
                     const hours = date.getHours(); // local time
-
-                    return `${day} ${hours.toString().padStart(2, '0')}LT`;
+                    return `${day} ${hours.toString().padStart(2, '0')}:00`;
                 }
-                function populateSelect(id, values) {
+                
+                function formatAltitudeLabel(code) {
+                    const raw = altitudeLabelMap?.[code];
+                    if (raw === undefined || raw === null) {
+                        return code;
+                    }
+                    if (typeof raw === 'number') {
+                        return `${raw} m AGL`;
+                    }
+                    const trimmed = String(raw).trim();
+                    if (trimmed === '') {
+                        return code;
+                    }
+                    const numeric = Number(trimmed);
+                    if (!Number.isNaN(numeric)) {
+                        return `${numeric} m AGL`;
+                    }
+                    return /m\b/i.test(trimmed) ? trimmed : `${trimmed} m AGL`;
+                }
+
+                function populateSelect(id, values, options = {}) {
                     const sel = document.getElementById(id);
-                    values.forEach(v => {
+                    sel.textContent = '';
+                    const { formatter, defaultValue } = options;
+                    values.forEach(value => {
                         const opt = document.createElement('option');
-                        opt.value = v;
-                        opt.textContent = (id === 'timeSelect') ? formatCustomTime(v) : v;
-                        if (id === 'altitudeSelect' && v === 'Z77') {
-                            opt.selected = true;
+                        opt.value = value;
+                        const label = formatter ? formatter(value) : value;
+                        opt.textContent = label;
+                        if (id === 'altitudeSelect' && label !== value) {
+                            opt.title = `${value} (${label})`;
                         }
                         sel.appendChild(opt);
                     });
+                    if (defaultValue !== undefined) {
+                        const matching = Array.from(sel.options).find(option => option.value === defaultValue);
+                        if (matching) {
+                            matching.selected = true;
+                        }
+                    }
                 }
 
-                Object.entries(selectIds).forEach(([key, id]) => populateSelect(id, options[key]));
+                populateSelect(selectIds.time, times, { formatter: formatCustomTime });
+                populateSelect(selectIds.altitude, altitudeSteps, { formatter: formatAltitudeLabel, defaultValue: defaultAltitudeLevel });
 
                 async function onChange() {
-                    const model = 'CH1'; // document.getElementById('modelSelect').value;
+                    const model = 'CH1'; 
                     const time = document.getElementById('timeSelect').value;
                     const altitude = document.getElementById('altitudeSelect').value;
-                    const member = 'CTRL'; // document.getElementById('memberSelect').value;
+                    const member = 'CTRL'; 
                     await updateLayers(model, member, altitude, time);
                 }
 
                 function prev(type) {
                     const sel = document.getElementById(selectIds[type]);
-                    if (sel.selectedIndex > 0) sel.selectedIndex -= 1;
+                    if (sel.selectedIndex > 0) {
+                        sel.selectedIndex -= 1;
+                    }
                     onChange();
                 }
 
                 function next(type) {
                     const sel = document.getElementById(selectIds[type]);
-                    if (sel.selectedIndex < sel.options.length - 1) sel.selectedIndex += 1;
+                    if (sel.selectedIndex < sel.options.length - 1) {
+                        sel.selectedIndex += 1;
+                    }
                     onChange();
                 }
 
                 window.onChange = onChange;
                 window.prev = prev;
                 window.next = next;
-
 
                 map.on('move', updateMarker);
                 map.dragRotate.disable();
@@ -445,7 +481,9 @@
                 onChange();
             }
 
-            initControls();
+            initControls().catch(error => {
+                console.error('Failed to initialise controls', error);
+            });
 
         });
 
