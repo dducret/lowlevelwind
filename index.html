@@ -334,7 +334,7 @@
             async function initControls() {
                 const models = ['CH1', 'CH2'];
                 const altitudeSteps = [];
-                for (let z = 1; z <= 80; ++z) {
+                for (let z = 35; z <= 80; ++z) { /* # According to MeteoSwiss, the published range is 1–80. Since Z35 is above 5,500 metres, no higher range is required */
                     altitudeSteps.push(`Z${z}`)
                 }
                 const members = ['CTRL', ...Array.from({ length: 11 }, (_, i) => `EPS${i}`)];
