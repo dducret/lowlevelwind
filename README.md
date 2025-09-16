@@ -3,6 +3,8 @@
 
 https://www.oliverwipfli.ch/low-level-wind-2025-07-09/
 
+http://github.com/wipfli/lowlevelwind
+
 ```
 docker build -t sma .
 docker run --rm -it -v "$(pwd)":/app sma python3 extract.py
