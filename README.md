@@ -1,5 +1,5 @@
 # Low Level Wind
-# Created by Oliver Wipfli with CLaude and ChatGPT help 
+# Created by Oliver Wipfli with Claude and ChatGPT help 
 
 https://www.oliverwipfli.ch/low-level-wind-2025-07-09/
 
