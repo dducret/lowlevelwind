@@ -146,11 +146,16 @@ def reproject_with_delauny(da, destination, indices, weights, lon, lat):
         lon=(("y", "x"), lon), lat=(("y", "x"), lat)
     ).squeeze()
 
-def get_filename(model, variable, reference_datetime, perturbed, horizon):
-    return f'icon-{model}-eps-{get_timestring(reference_datetime)}-{get_horizon_hours(horizon)}-{variable.lower()}-{"ctrl" if not perturbed else eps}.grib2'
+def get_filename(model, variable, reference_datetime, perturbed, horizon, eps):
+    member = "ctrl"
+    if perturbed:
+        if eps is None:
+            raise ValueError("eps must be provided for perturbed members")
+        member = str(eps)
+    return f'icon-{model}-eps-{get_timestring(reference_datetime)}-{get_horizon_hours(horizon)}-{variable.lower()}-{member}.grib2'
 
-def download(model, variable, reference_datetime, perturbed, horizon):
-    print(f'Download {get_filename(model, variable, reference_datetime, perturbed, horizon)}...')
+def download(model, variable, reference_datetime, perturbed, horizon, eps):
+    print(f'Download {get_filename(model, variable, reference_datetime, perturbed, horizon, eps)}...')
     req = ogd_api.Request(
         collection=get_collection(model),
         variable=variable,
@@ -160,13 +165,20 @@ def download(model, variable, reference_datetime, perturbed, horizon):
     )
     ogd_api.download_from_ogd(req, Path(cache_path))
 
+_GEO_COORDS_CACHE = None
+
 def geo_coords(uuid):
-    ds = grib_decoder.load(
-        source=data_source.FileDataSource(datafiles=[f"{cache_path}/horizontal_constants_icon-ch1-eps.grib2"]), 
-        request={"param": ["CLON", "CLAT"]}, 
-        geo_coords=lambda uuid: {}
-    )
-    return {"lat": ds["CLAT"].squeeze(), "lon": ds["CLON"].squeeze()}
+    global _GEO_COORDS_CACHE
+
+    if _GEO_COORDS_CACHE is None:
+        ds = grib_decoder.load(
+            source=data_source.FileDataSource(datafiles=[f"{cache_path}/horizontal_constants_icon-ch1-eps.grib2"]),
+            request={"param": ["CLON", "CLAT"]},
+            geo_coords=lambda uuid: {}
+        )
+        _GEO_COORDS_CACHE = {"lat": ds["CLAT"].squeeze(), "lon": ds["CLON"].squeeze()}
+
+    return _GEO_COORDS_CACHE
 
 def get_timestring(reference_datetime):
     return reference_datetime.strftime('%Y%m%d%H%M')
@@ -181,7 +193,7 @@ def read(model, variable, reference_datetime, perturbed, horizon, eps, z):
         variables = list(variable)
 
     datafiles = [
-        f"{cache_path}/{get_filename(model, var, reference_datetime, perturbed, horizon)}"
+        f"{cache_path}/{get_filename(model, var, reference_datetime, perturbed, horizon, eps)}"
         for var in variables
     ]
 
@@ -342,9 +354,9 @@ if __name__ == "__main__":
         horizons = get_horizons(model)
 
         for horizon in horizons:
-            download(model, 'U', reference_datetime, perturbed, horizon)
-            download(model, 'V', reference_datetime, perturbed, horizon)
-
+            download(model, 'U', reference_datetime, perturbed, horizon, eps)
+            download(model, 'V', reference_datetime, perturbed, horizon, eps)
+            
         print('Make height fields...')
         make_height_fields()
 
