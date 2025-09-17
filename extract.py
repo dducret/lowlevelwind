@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
 from meteodatalab import ogd_api
 import regrid
 from meteodatalab import grib_decoder, data_source
@@ -23,7 +24,7 @@ cache_path = 'sma-cache'
 data_path = 'data'
 data_copy_path = '/data/sites/station/application/lowlevelwind/data-copy/'
 
-z_values = range(1, 81)
+z_values = range(35, 81)  # According to MeteoSwiss, the published range is 1–80. Since Z35 is above 5,500 metres, no higher range is required
 
 def get_collection(model):
     return f'ogd-forecasting-icon-{model}'
@@ -72,28 +73,28 @@ def save_png(f_U, f_V, filename):
     ms_to_kmh = 3.6
     nan_value = 0
 
+    def _scale_wind_component(values):
+        return np.nan_to_num(
+            values * ms_to_kmh + shift,
+            nan=nan_value,
+            posinf=nan_value,
+            neginf=nan_value,
+        )
+        
     alpha = np.ones(f_U.values.shape)
     alpha[np.isnan(f_U.values)] = 0
     alpha *= 255
 
-    f_U_vals = f_U.values.copy()
-    f_V_vals = f_V.values.copy()
-
-    f_U_vals[np.isfinite(f_U_vals)] *= ms_to_kmh
-    f_U_vals[np.isfinite(f_U_vals)] += shift
-    f_U_vals[np.isnan(f_U_vals)] = nan_value
-
-    f_V_vals[np.isfinite(f_V_vals)] *= ms_to_kmh
-    f_V_vals[np.isfinite(f_V_vals)] += shift
-    f_V_vals[np.isnan(f_V_vals)] = nan_value
+    f_U_vals = _scale_wind_component(f_U.values)
+    f_V_vals = _scale_wind_component(f_V.values)
 
     rgba = np.stack(
         [
             f_U_vals.astype(np.uint8),
             f_V_vals.astype(np.uint8),
-            np.zeros(f_U_vals.shape).astype(np.uint8),
+            np.zeros_like(f_U_vals, dtype=np.uint8),
             alpha.astype(np.uint8)
-        ], 
+        ],
         axis=0
     )
 
@@ -174,44 +175,80 @@ def get_horizon_hours(horizon):
     return int(horizon.total_seconds() / 3600)
 
 def read(model, variable, reference_datetime, perturbed, horizon, eps, z):
-    filename = get_filename(model, variable, reference_datetime, perturbed, horizon)
+    if isinstance(variable, str):
+        variables = [variable]
+    else:
+        variables = list(variable)
+
+    datafiles = [
+        f"{cache_path}/{get_filename(model, var, reference_datetime, perturbed, horizon)}"
+        for var in variables
+    ]
+
+    if isinstance(z, Sequence) and not isinstance(z, (str, bytes)):
+        levelist = list(z)
+    else:
+        levelist = z
+
+    request = {
+        "param": variables if len(variables) > 1 else variables[0],
+    }
+
+    if levelist is not None:
+        request["levelist"] = levelist
     data = grib_decoder.load(
-        source=data_source.FileDataSource(datafiles=[f"{cache_path}/{filename}"]), 
-        request={
-            "param": variable,
-            "levelist": z,
-        }, 
+        source=data_source.FileDataSource(datafiles=datafiles),
+        request=request,
         geo_coords=geo_coords
     )
-    return data[variable]
+    if len(variables) == 1:
+        return data[variables[0]]
+
+    return data
 
 def make_horizon(reference_datetime, horizon, model, perturbed, eps):
     os.makedirs(data_path, exist_ok=True)
 
-    destination_U = None
-    indices_U = None
-    weights_U = None
-    lon_U = None
-    lat_U = None
+    destination = None
+    indices = None
+    weights = None
+    lon = None
+    lat = None
 
-    destination_V = None
-    indices_V = None
-    weights_V = None
-    lon_V = None
-    lat_V = None
+    levels = list(z_values)
+    wind_data = read(model, ["U", "V"], reference_datetime, perturbed, horizon, eps, levels)
 
-    for z in z_values:
-        print(f'Working on horizon={get_horizon_hours(horizon)}, z={z}...')
-        da_U = read(model, 'U', reference_datetime, perturbed, horizon, eps, z)
-        da_V = read(model, 'V', reference_datetime, perturbed, horizon, eps, z)
+    da_U_levels = wind_data["U"].squeeze(drop=True)
+    da_V_levels = wind_data["V"].squeeze(drop=True)
 
-        if destination_U is None:
-            destination_U, indices_U, weights_U, lon_U, lat_U = get_delauny(da_U)
-            destination_V, indices_V, weights_V, lon_V, lat_V = get_delauny(da_V)
+    ignored_dims = {"y", "x", "time", "step", "eps"}
+    level_dim_U = next((dim for dim in da_U_levels.dims if dim not in ignored_dims), None)
+    level_dim_V = next((dim for dim in da_V_levels.dims if dim not in ignored_dims), None)
 
-        f_U = reproject_with_delauny(da_U, destination_U, indices_U, weights_U, lon_U, lat_U)
-        f_V = reproject_with_delauny(da_V, destination_V, indices_V, weights_V, lon_V, lat_V)
+    total_levels = len(levels)
+    if level_dim_U:
+        total_levels = min(total_levels, da_U_levels.sizes[level_dim_U])
+    if level_dim_V:
+        total_levels = min(total_levels, da_V_levels.sizes[level_dim_V])
 
+    for idx, z in enumerate(levels[:total_levels]):
+        print(f'Working on horizon={get_horizon_hours(horizon)}, z={z} of 80')
+        
+        if level_dim_U:
+            da_U = da_U_levels.isel({level_dim_U: idx}).squeeze(drop=True)
+        else:
+            da_U = da_U_levels
+
+        if level_dim_V:
+            da_V = da_V_levels.isel({level_dim_V: idx}).squeeze(drop=True)
+        else:
+            da_V = da_V_levels
+        if destination is None:
+            destination, indices, weights, lon, lat = get_delauny(da_U)
+            
+        f_U = reproject_with_delauny(da_U, destination, indices, weights, lon, lat)
+        f_V = reproject_with_delauny(da_V, destination, indices, weights, lon, lat)
+        
         member_filename = f'EPS{eps}' if perturbed else 'CTRL'
         model_filename = model.upper()
         z_filename = f'Z{z}'
@@ -322,7 +359,7 @@ if __name__ == "__main__":
             for future in as_completed(future_to_horizon):
                 horizon = future_to_horizon[future]
                 result = future.result()
-                print(f"Horizon Completed: {result} of {len(horizons)}")
+                print(f"Horizon Completed: {result} of {len(horizons)-1}")
                 
         with open('data/last_run.json', 'w') as f:
             json.dump({"last_run": latest_available_run}, f)
