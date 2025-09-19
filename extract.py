@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from collections.abc import Sequence
 from meteodatalab import ogd_api
-import regrid
 from meteodatalab import grib_decoder, data_source
+from meteodatalab.operators import regrid
 from meteodatalab.operators.destagger import destagger
 
 import time
@@ -127,7 +127,7 @@ def save_geotiff(da, filename):
     ) as dst:
         dst.write(da.values[::-1, :].astype(np.float32), 1)
 
-def get_delauny(da):
+def get_destination_grid():
     xmin = 5.379264
     xmax = 11.024297
     ymin = 45.497280
@@ -136,15 +136,12 @@ def get_delauny(da):
     nx = 429
     ny = 195
 
-    destination = regrid.RegularGrid(
+    return regrid.RegularGrid(
         CRS.from_string("epsg:4326"), nx, ny, xmin, xmax, ymin, ymax
     )
-    return (destination,) + regrid.iconremap_delauny(da, destination)
 
-def reproject_with_delauny(da, destination, indices, weights, lon, lat):
-    return regrid.icon2regular(da, destination, indices, weights).assign_coords(
-        lon=(("y", "x"), lon), lat=(("y", "x"), lat)
-    ).squeeze()
+def reproject_to_destination(da, destination):
+    return regrid.iconremap(da, destination).squeeze()
 
 def get_filename(model, variable, reference_datetime, perturbed, horizon, eps):
     member = "ctrl"
@@ -221,11 +218,7 @@ def read(model, variable, reference_datetime, perturbed, horizon, eps, z):
 def make_horizon(reference_datetime, horizon, model, perturbed, eps):
     os.makedirs(data_path, exist_ok=True)
 
-    destination = None
-    indices = None
-    weights = None
-    lon = None
-    lat = None
+    destination = get_destination_grid()
 
     levels = list(z_values)
     wind_data = read(model, ["U", "V"], reference_datetime, perturbed, horizon, eps, levels)
@@ -255,11 +248,9 @@ def make_horizon(reference_datetime, horizon, model, perturbed, eps):
             da_V = da_V_levels.isel({level_dim_V: idx}).squeeze(drop=True)
         else:
             da_V = da_V_levels
-        if destination is None:
-            destination, indices, weights, lon, lat = get_delauny(da_U)
             
-        f_U = reproject_with_delauny(da_U, destination, indices, weights, lon, lat)
-        f_V = reproject_with_delauny(da_V, destination, indices, weights, lon, lat)
+        f_U = reproject_to_destination(da_U, destination)
+        f_V = reproject_to_destination(da_V, destination)
         
         member_filename = f'EPS{eps}' if perturbed else 'CTRL'
         model_filename = model.upper()
@@ -279,15 +270,9 @@ def make_height_fields():
     
     os.makedirs(data_path, exist_ok=True)
     
-    destination = None
-    indices = None
-    weights = None
-    lon = None
-    lat = None
+    destination = get_destination_grid()
     for z in z_values:
-        if destination is None:
-            destination, indices, weights, lon, lat = get_delauny(hfl.sel(z=z))
-        projected = reproject_with_delauny(hfl.sel(z=z), destination, indices, weights, lon, lat)
+        projected = reproject_to_destination(hfl.sel(z=z), destination)
         save_geotiff(projected, f'{data_path}/hfl-Z{z}.tif')
 
 def delete_all_files_in_folder(folder):
