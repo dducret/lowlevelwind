@@ -36,7 +36,7 @@ def get_horizons(model):
 def get_latest_reference_datetime(model, variable, perturbed, horizon):
     global successful_api_calls
     global failed_api_calls
-    
+
     r = ogd_api.Request(
         collection=get_collection(model),
         variable=variable,
@@ -80,7 +80,7 @@ def save_png(f_U, f_V, filename):
             posinf=nan_value,
             neginf=nan_value,
         )
-        
+
     alpha = np.ones(f_U.values.shape)
     alpha[np.isnan(f_U.values)] = 0
     alpha *= 255
@@ -128,13 +128,28 @@ def save_geotiff(da, filename):
         dst.write(da.values[::-1, :].astype(np.float32), 1)
 
 def get_destination_grid():
-    xmin = 5.379264
-    xmax = 11.024297
-    ymin = 45.497280
-    ymax = 48.105836
+    xmin = 0.0
+    xmax = 17.7
+    ymin = 42.0
+    ymax = 50.4
 
-    nx = 429
-    ny = 195
+    # xmin = 5.379264
+    # xmax = 11.024297
+    # ymin = 45.497280
+    # ymax = 48.105836
+  
+    # Preserve the original CH1 grid resolution when expanding the
+    # extraction window. The spacing figures come from the documented
+    # approach in https://github.com/MeteoSwiss/opendata-nwp-demos/
+    # blob/2ddfa03f4e3cfe3e57b0bf1696b62d9c5b61c2ad/computing_nx_ny.md
+    # (see "Target grid" section). Using the rounded ratio keeps the
+    # grid aligned with the PNGs consumed by the frontend so U/V vectors
+    # are rendered in the correct locations.
+    dx = 0.013189329439252337
+    dy = 0.013446164948453573
+
+    nx = round((xmax - xmin) / dx) + 1
+    ny = round((ymax - ymin) / dy) + 1
 
     return regrid.RegularGrid(
         CRS.from_string("epsg:4326"), nx, ny, xmin, xmax, ymin, ymax
@@ -238,7 +253,7 @@ def make_horizon(reference_datetime, horizon, model, perturbed, eps):
 
     for idx, z in enumerate(levels[:total_levels]):
         print(f'Working on horizon={get_horizon_hours(horizon)}, z={z} of 80')
-        
+
         if level_dim_U:
             da_U = da_U_levels.isel({level_dim_U: idx}).squeeze(drop=True)
         else:
@@ -248,10 +263,10 @@ def make_horizon(reference_datetime, horizon, model, perturbed, eps):
             da_V = da_V_levels.isel({level_dim_V: idx}).squeeze(drop=True)
         else:
             da_V = da_V_levels
-            
+
         f_U = reproject_to_destination(da_U, destination)
         f_V = reproject_to_destination(da_V, destination)
-        
+
         member_filename = f'EPS{eps}' if perturbed else 'CTRL'
         model_filename = model.upper()
         z_filename = f'Z{z}'
@@ -262,14 +277,14 @@ def make_horizon(reference_datetime, horizon, model, perturbed, eps):
 
 def make_height_fields():
     ds = grib_decoder.load(
-        source=data_source.FileDataSource(datafiles=[f"{cache_path}/vertical_constants_icon-ch1-eps.grib2"]), 
-        request={"param": "HHL"}, 
+        source=data_source.FileDataSource(datafiles=[f"{cache_path}/vertical_constants_icon-ch1-eps.grib2"]),
+        request={"param": "HHL"},
         geo_coords=geo_coords
     )
     hfl = destagger(ds["HHL"].squeeze(drop=True), "z")
-    
+
     os.makedirs(data_path, exist_ok=True)
-    
+
     destination = get_destination_grid()
     for z in z_values:
         projected = reproject_to_destination(hfl.sel(z=z), destination)
@@ -289,15 +304,15 @@ def delete_all_files_in_folder(folder):
 def copy_all_files(src_folder, dst_folder):
     print(f'Copy files from {src_folder} to {dst_folder}...')
     os.makedirs(dst_folder, exist_ok=True)
-    
+
     if not os.path.exists(src_folder):
         print(f"Source folder {src_folder} does not exist")
         return
-    
+
     for filename in os.listdir(src_folder):
         src_file = os.path.join(src_folder, filename)
         dst_file = os.path.join(dst_folder, filename)
-        
+
         if os.path.isfile(src_file):
             try:
                 shutil.copy2(src_file, dst_file)
@@ -324,7 +339,7 @@ if __name__ == "__main__":
         eps = 0
 
         reference_datetime = get_latest_completed_reference_datetime(model) # 2025-06-28 09:00:00+00:00
-        
+
         latest_available_run = int(reference_datetime.timestamp())
 
         if last_run == latest_available_run:
@@ -332,16 +347,16 @@ if __name__ == "__main__":
             print(f'No new run available. Sleep for {sleep_min} min...')
             time.sleep(sleep_min * 60)
             continue
-        
+
         print(f'Found new run {reference_datetime}...')
         delete_all_files_in_folder(data_path)
-        
+
         horizons = get_horizons(model)
 
         for horizon in horizons:
             download(model, 'U', reference_datetime, perturbed, horizon, eps)
             download(model, 'V', reference_datetime, perturbed, horizon, eps)
-            
+
         print('Make height fields...')
         make_height_fields()
 
@@ -349,15 +364,15 @@ if __name__ == "__main__":
         print(f"Starting parallel tasks with {num_threads} threads...")
         with ProcessPoolExecutor(max_workers=num_threads) as executor:
             future_to_horizon = {
-                executor.submit(make_horizon, reference_datetime, horizon, model, perturbed, eps): horizon 
+                executor.submit(make_horizon, reference_datetime, horizon, model, perturbed, eps): horizon
                 for horizon in horizons
             }
-            
+
             for future in as_completed(future_to_horizon):
                 horizon = future_to_horizon[future]
                 result = future.result()
                 print(f"Horizon Completed: {result} of {len(horizons)-1}")
-                
+
         with open('data/last_run.json', 'w') as f:
             json.dump({"last_run": latest_available_run}, f)
         copy_all_files(data_path, data_copy_path)
