@@ -26,6 +26,51 @@
             width: 100%;
         }
 
+        #loadingOverlay {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(255, 255, 255, 0.85);
+            z-index: 2000;
+            transition: opacity 0.3s ease, visibility 0.3s ease;
+        }
+
+        #loadingOverlay.is-hidden {
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        #loadingOverlay .hourglass {
+            font-size: 64px;
+            animation: hourglass-spin 1.2s linear infinite;
+        }
+
+        @keyframes hourglass-spin {
+            0% {
+                transform: rotate(0deg);
+            }
+            50% {
+                transform: rotate(180deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+        
         .center-marker {
             position: absolute;
             top: 25%;
@@ -142,6 +187,10 @@
 </head>
 
 <body>
+    <div id="loadingOverlay" role="status" aria-live="polite">
+        <div class="hourglass" aria-hidden="true">⌛</div>
+        <span class="sr-only">Loading…</span>
+    </div>
     <div id="map">
     </div>
     <div id="controls">
@@ -190,7 +239,42 @@
             [0, [0, 0, 0]],
             [15, [255, 255, 255]],
         ];
+        const loadingOverlay = document.getElementById('loadingOverlay');
 
+        const overlayLocks = new Set();
+        const updateOverlayVisibility = () => {
+            if (!loadingOverlay) {
+                return;
+            }
+            if (overlayLocks.size > 0) {
+                loadingOverlay.classList.remove('is-hidden');
+            } else {
+                loadingOverlay.classList.add('is-hidden');
+            }
+        };
+        const requestOverlayLock = key => {
+            if (!loadingOverlay) {
+                return;
+            }
+            overlayLocks.add(key);
+            updateOverlayVisibility();
+        };
+        const releaseOverlayLock = key => {
+            if (!loadingOverlay) {
+                return;
+            }
+            overlayLocks.delete(key);
+            updateOverlayVisibility();
+        };
+
+        const INITIAL_OVERLAY_LOCK = 'initial-page-load';
+        requestOverlayLock(INITIAL_OVERLAY_LOCK);
+        const handleInitialLoadComplete = () => releaseOverlayLock(INITIAL_OVERLAY_LOCK);
+        window.addEventListener('load', handleInitialLoadComplete, { once: true });
+        if (document.readyState === 'complete') {
+            handleInitialLoadComplete();
+        }
+        
         const buildForecastUrl = (model, member, altitude, time) =>
             `data-copy/${model}-${member}-${altitude}-${time}-wind.png`;
         const buildHeightUrl = altitude => `data-copy/hfl-${altitude}.tif`;
@@ -423,6 +507,8 @@
 
                 const updateLayers = async (model, member, altitude, time) => {
                     const token = ++latestUpdateToken;
+                    const overlayKey = `layer-update-${token}`;
+                    requestOverlayLock(overlayKey);
                     let textures;
                     try {
                         textures = await Promise.all([
@@ -436,15 +522,21 @@
                             hflImage = undefined;
                             setEmptyLayers();
                         }
+                        releaseOverlayLock(overlayKey);
                         return;
                     }
 
                     if (token !== latestUpdateToken) {
+                        releaseOverlayLock(overlayKey);
                         return;
                     }
 
-                    [image, hflImage] = textures;
-                    applyLayers();
+                    try {
+                        [image, hflImage] = textures;
+                        applyLayers();
+                    } finally {
+                        releaseOverlayLock(overlayKey);
+                    }
                 };
 
                 window.addEventListener('resize', requestLayerRefresh);
