@@ -22,7 +22,7 @@ failed_api_calls = 0
 
 cache_path = 'sma-cache'
 data_path = 'data'
-data_copy_path = '/data/sites/station/application/lowlevelwind/data-copy/'
+data_copy_path = 'data-copy'
 
 z_values = range(35, 81)  # According to MeteoSwiss, the published range is 1–80. Since Z35 is above 5,500 metres, no higher range is required
 
@@ -328,8 +328,9 @@ if __name__ == "__main__":
         print('Failed API calls', failed_api_calls)
 
         last_run = ''
+        last_run_path = Path(data_path) / "last_run.json"
         try:
-            with open('data/last_run.json') as f:
+             with last_run_path.open() as f:
                 last_run = json.load(f)['last_run']
         except FileNotFoundError:
             pass
@@ -373,7 +374,8 @@ if __name__ == "__main__":
                 result = future.result()
                 print(f"Horizon Completed: {result} of {len(horizons)-1}")
 
-        with open('data/last_run.json', 'w') as f:
+        wlast_run_path.parent.mkdir(parents=True, exist_ok=True)
+        with last_run_path.open('w') as f:
             json.dump({"last_run": latest_available_run}, f)
         copy_all_files(data_path, data_copy_path)
         delete_all_files_in_folder(cache_path)
